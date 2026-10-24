@@ -25,6 +25,14 @@ summary{cursor:pointer;color:var(--mut);margin:8px 0}
 select{padding:6px 8px}
 h2{font-size:15px;margin:20px 0 4px;display:flex;justify-content:space-between;align-items:center}
 #pst{font-weight:400;color:var(--mut);font-size:13px}
+input[type=text]{font:inherit;color:var(--ink);background:#fff;border:1px solid var(--line);border-radius:6px;padding:6px 8px;width:100%}
+.inl{display:flex;gap:6px;align-items:center}.inl select{flex:1}
+.hint{color:var(--mut);font-size:13px}
+#nm{margin:10px 0 4px}
+#torch{flex:1}#torch.on{background:var(--ink);color:#fff}
+#tools{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}
+#tools button{padding:6px 10px}
+li input[type=checkbox]{margin-right:6px}
 ul{list-style:none;margin:0;padding:0}
 li{padding:7px 0;border-bottom:1px solid var(--line);word-break:break-all}
 a{color:#0b5cad}
@@ -33,8 +41,15 @@ a{color:#0b5cad}
 <body>
 <video id="v" autoplay playsinline muted></video>
 <div id="info"></div><div id="st"></div>
-<div class="row"><button id="rec">録画開始</button><button id="snap">静止画</button></div>
+<div class="row"><button id="rec">録画開始</button><button id="snap">静止画</button><button id="torch" hidden>ライト点灯</button></div>
 <label><input type="checkbox" id="qr"> <span id="qrt">QRコードを読み取る</span></label>
+<div class="grid" id="nm">
+<label for="subj">科目</label><span class="inl"><select id="subj"></select><button class="s" id="sadd">追加</button><button class="s" id="sdel">削除</button></span>
+<label for="tpl">ファイル名</label><input type="text" id="tpl" autocomplete="off">
+<label for="sid">学籍番号</label><input type="text" id="sid" autocomplete="off">
+</div>
+<div id="pv" class="hint"></div>
+<div class="hint">使える項目: {科目} {学籍番号} {日付} {時刻} {日時} {連番}。ファイル名は科目ごとに別々に設定できます。科目名と学籍番号はこの端末にだけ保存され、公開するファイルには含まれません。</div>
 <details open><summary>設定</summary>
 <div class="grid">
 <label for="face">カメラ</label><select id="face"><option value="environment">背面</option><option value="user">前面</option></select>
@@ -43,10 +58,12 @@ a{color:#0b5cad}
 <label for="br">ビットレート</label><select id="br"><option value="1">1 Mbps(約7MB/分)</option><option value="2.5" selected>2.5 Mbps(約19MB/分)</option><option value="5">5 Mbps(約38MB/分)</option><option value="10">10 Mbps(約75MB/分)</option></select>
 <label for="seg">ファイル分割</label><select id="seg"><option value="0">しない</option><option value="5">5分ごと</option><option value="10" selected>10分ごと</option><option value="30">30分ごと</option></select>
 <label for="gc">自動整理</label><select id="gc"><option value="0">しない</option><option value="1">書き出し済みを1日後に削除</option><option value="3">書き出し済みを3日後に削除</option><option value="7" selected>書き出し済みを7日後に削除</option><option value="30">書き出し済みを30日後に削除</option></select>
+<label for="sfmt">静止画の形式</label><select id="sfmt"><option value="jpeg">JPEG</option><option value="png">PNG</option></select>
 <label for="aud">音声</label><input type="checkbox" id="aud" checked>
 </div></details>
 <h2>QR履歴 <button class="s" id="qclr">消去</button></h2><ul id="qlog"></ul>
-<h2>保存ファイル <span><span id="pst"></span><button class="s" id="gcb">整理</button></span></h2><ul id="files"></ul>
+<h2>保存ファイル <span id="pst"></span></h2>
+<div id="tools"><button id="sela">全選択/解除</button><button id="pdfb">選択画像をPDFに</button><button id="seld">選択を削除</button><button id="gcb">書き出し済みを削除</button><button id="alld">すべて削除</button></div><ul id="files"></ul>
 <script>
 'use strict';
 const $=id=>document.getElementById(id),v=$('v');
@@ -54,15 +71,20 @@ const MIMES=['video/mp4;codecs=avc1,mp4a.40.2','video/mp4','video/webm;codecs=vp
 const mime=window.MediaRecorder?MIMES.find(m=>MediaRecorder.isTypeSupported(m))||'':'';
 const ext=mime.includes('mp4')?'mp4':'webm';
 const MIN_FREE=300*2**20; // これを下回ると自動停止
-let stream,rec,segTimer,wake,root,base,seg=0,bytes=0,t0=0,recording=false,stopping=false,note='';
+let stream,rec,segTimer,wake,root,startD,activeName='',seg=0,bytes=0,t0=0,recording=false,stopping=false,note='',torchOn=false;
+const sel=new Set(),cache=new Map();
 const pad=n=>String(n).padStart(2,'0');
 const stamp=()=>{const d=new Date();return ''+d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'_'+pad(d.getHours())+pad(d.getMinutes())+pad(d.getSeconds())};
 const fmt=b=>b>=2**30?(b/2**30).toFixed(2)+' GB':(b/2**20).toFixed(1)+' MB';
 const msg=t=>$('st').textContent=t, warn=t=>{note=t;msg(t)};
 const dir=async()=>root||(root=await navigator.storage.getDirectory());
 const free=async()=>{const e=await navigator.storage.estimate();return e.quota-e.usage};
-const mt=n=>n.endsWith('.mp4')?'video/mp4':n.endsWith('.webm')?'video/webm':'image/jpeg';
+const mt=n=>/\.mp4$/i.test(n)?'video/mp4':/\.webm$/i.test(n)?'video/webm':/\.png$/i.test(n)?'image/png':/\.pdf$/i.test(n)?'application/pdf':'image/jpeg';
 const typed=(f,n)=>new File([f],n,{type:mt(n)});
+const dl=(b,n)=>{const u=URL.createObjectURL(b);Object.assign(document.createElement('a'),{href:u,download:n}).click();setTimeout(()=>URL.revokeObjectURL(u),6e4)};
+const draw=bm=>{const c=document.createElement('canvas');c.width=bm.width;c.height=bm.height;c.getContext('2d').drawImage(bm,0,0);return c};
+const blob=(c,t,q)=>new Promise(r=>c.toBlob(r,t,q));
+const isImg=n=>/\.(jpe?g|png)$/i.test(n);
 const btn=(t,f)=>Object.assign(document.createElement('button'),{textContent:t,onclick:f,className:'s'});
 
 async function startCam(){
@@ -74,16 +96,16 @@ async function startCam(){
     try{stream=await navigator.mediaDevices.getUserMedia({video});$('aud').checked=false;msg('マイクなしで起動しました')}
     catch(e2){msg('カメラを起動できません('+e2.name+')。権限とHTTPS接続を確認してください');return}
   }
-  v.srcObject=stream;
+  v.srcObject=stream;torchOn=false;$('torch').hidden=!stream.getVideoTracks()[0]?.getCapabilities?.().torch;setTorchUi();
 }
 
 function lock(on){
-  ['face','res','fps','aud','br','seg'].forEach(i=>$(i).disabled=on);
+  ['face','res','fps','aud','br','seg','subj','tpl','sid'].forEach(i=>$(i).disabled=on);
   $('rec').textContent=on?'停止':'録画開始';$('rec').classList.toggle('on',on);
 }
 
 async function newSeg(){
-  const name=`rec_${base}_${pad(++seg)}.${ext}`;
+  const name=await uniq(fname(startD,++seg),ext);activeName=name;
   const w=await(await(await dir()).getFileHandle(name,{create:true})).createWritable();
   const r=rec=new MediaRecorder(stream,{mimeType:mime||undefined,videoBitsPerSecond:+$('br').value*1e6});
   let chain=Promise.resolve();
@@ -106,15 +128,15 @@ async function newSeg(){
 
 async function startRec(){
   if(!stream?.active)return msg('カメラが起動していません');
-  if(await free()<MIN_FREE)return msg('空き容量が不足しています。「整理」で書き出し済みファイルを削除できます');
+  if(await free()<MIN_FREE)return msg('空き容量が不足しています。「書き出し済みを削除」で容量を空けられます');
   navigator.storage.persist?.();
-  base=stamp();seg=0;bytes=0;t0=Date.now();stopping=false;recording=true;note='';msg('');
+  startD=new Date();seg=0;bytes=0;t0=Date.now();stopping=false;recording=true;note='';msg('');
   try{wake=await navigator.wakeLock?.request('screen')}catch{}
   lock(true);
   try{await newSeg()}catch(e){warn('録画を開始できません('+e.message+')');finish()}
 }
 function stopRec(){stopping=true;if(rec&&rec.state!=='inactive')rec.stop()}
-function finish(){recording=false;wake?.release().catch(()=>{});lock(false);msg(note||'保存しました');note='';list();autoGc()}
+function finish(){recording=false;activeName='';wake?.release().catch(()=>{});lock(false);msg(note||'保存しました');note='';list();autoGc()}
 
 async function tick(){
   const f=await free();
@@ -128,9 +150,9 @@ $('snap').onclick=async()=>{
   if(!v.videoWidth)return;
   const c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;
   c.getContext('2d').drawImage(v,0,0);
-  const b=await new Promise(r=>c.toBlob(r,'image/jpeg',.92));
+  const fm=$('sfmt').value,b=await new Promise(r=>c.toBlob(r,'image/'+fm,.92));
   try{
-    const w=await(await(await dir()).getFileHandle(`img_${stamp()}_${Date.now()%1000}.jpg`,{create:true})).createWritable();
+    const w=await(await(await dir()).getFileHandle(await uniq(fname(new Date()),fm==='jpeg'?'jpg':'png'),{create:true})).createWritable();
     await w.write(b);await w.close();list();
   }catch(e){msg('静止画を保存できません('+e.name+')')}
 };
@@ -162,20 +184,127 @@ function renderQr(){
 }
 $('qclr').onclick=()=>{qlog=[];try{localStorage.qlog='[]'}catch{}renderQr()};
 
+/* ライト(背面カメラの対応端末のみ) */
+function setTorchUi(){const t=$('torch');t.classList.toggle('on',torchOn);t.textContent=torchOn?'ライト消灯':'ライト点灯'}
+$('torch').onclick=async()=>{
+  try{await stream.getVideoTracks()[0].applyConstraints({advanced:[{torch:!torchOn}]});torchOn=!torchOn}
+  catch(e){msg('ライトを使えません('+e.name+')')}
+  setTorchUi();
+};
+
+/* ファイル名: 科目・学籍番号はこの端末のlocalStorageにだけ保存(コードには含まれない) */
+const ls={get:(k,d)=>{try{return JSON.parse(localStorage.getItem('c_'+k))??d}catch{return d}},set:(k,v)=>{try{localStorage.setItem('c_'+k,JSON.stringify(v))}catch{}}};
+let subjects=ls.get('subjects',['有機化学','物理化学','物理実験','無機化学']),tpls=ls.get('tpl',{});
+const DEF_TPL='{科目}_{日時}';
+function fname(d,idx){
+  const D=''+d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate()),T=pad(d.getHours())+pad(d.getMinutes())+pad(d.getSeconds());
+  const t=$('tpl').value.trim()||DEF_TPL;
+  let n=t.replace(/\{科目\}/g,$('subj').value).replace(/\{学籍番号\}/g,$('sid').value.trim()).replace(/\{日付\}/g,D).replace(/\{時刻\}/g,T).replace(/\{日時\}/g,D+'_'+T).replace(/\{連番\}/g,idx?pad(idx):'');
+  if(idx&&!/\{連番\}/.test(t))n+='_'+pad(idx);
+  n=n.replace(/[\\/:*?"<>|\u0000-\u001f]/g,'_').replace(/_+/g,'_').replace(/^[_\s.]+|[_\s.]+$/g,'');
+  return n||'file_'+D+'_'+T;
+}
+async function uniq(stem,e){ // 同名があれば _2, _3 … を付けて上書きを防ぐ
+  const d=await dir();let n=stem+'.'+e,i=1;
+  while(await d.getFileHandle(n).then(()=>true,()=>false))n=`${stem}_${++i}.${e}`;
+  return n;
+}
+const updPv=()=>{$('pv').textContent='保存名の例: '+fname(new Date(),1)+'.'+ext};
+function loadTpl(){$('tpl').value=tpls[$('subj').value]??DEF_TPL;updPv()}
+function drawSubj(){
+  const el=$('subj'),cur=ls.get('subj','');
+  el.replaceChildren(new Option('(未設定)',''),...subjects.map(x=>new Option(x,x)));
+  el.value=subjects.includes(cur)?cur:'';
+  loadTpl();
+}
+$('subj').onchange=()=>{ls.set('subj',$('subj').value);loadTpl()};
+$('tpl').oninput=()=>{tpls[$('subj').value]=$('tpl').value;ls.set('tpl',tpls);updPv()};
+$('sid').value=ls.get('sid','');
+$('sid').oninput=()=>{ls.set('sid',$('sid').value);updPv()};
+$('sfmt').value=ls.get('sfmt','jpeg');
+$('sfmt').onchange=()=>ls.set('sfmt',$('sfmt').value);
+$('sadd').onclick=()=>{
+  const n=(prompt('科目名を入力してください')||'').trim();
+  if(!n||subjects.includes(n))return;
+  subjects.push(n);ls.set('subjects',subjects);ls.set('subj',n);drawSubj();
+};
+$('sdel').onclick=()=>{
+  const n=$('subj').value;
+  if(!n||!confirm(`科目「${n}」を一覧から削除しますか?(保存済みのファイルは消えません)`))return;
+  subjects=subjects.filter(x=>x!==n);delete tpls[n];ls.set('subjects',subjects);ls.set('tpl',tpls);ls.set('subj','');drawSubj();
+};
+
+/* PDF: 選択した画像を1ページ1枚でまとめる(JPEGはそのまま埋め込む) */
+function pdfFrom(imgs){
+  const enc=new TextEncoder(),parts=[],off=[];let len=0;const N=imgs.length;
+  const put=x=>{const b=typeof x==='string'?enc.encode(x):x;parts.push(b);len+=b.length};
+  const ob=(n,t)=>{off[n]=len;put(`${n} 0 obj\n${t}`)};
+  put('%PDF-1.4\n');
+  ob(1,'<</Type/Catalog/Pages 2 0 R>>\nendobj\n');
+  ob(2,`<</Type/Pages/Count ${N}/Kids[${imgs.map((_,i)=>`${3+3*i} 0 R`).join(' ')}]>>\nendobj\n`);
+  imgs.forEach((m,i)=>{
+    const p=3+3*i,W=m.w*.75,H=m.h*.75,cs=`q ${W} 0 0 ${H} 0 0 cm /I Do Q`;
+    ob(p,`<</Type/Page/Parent 2 0 R/MediaBox[0 0 ${W} ${H}]/Contents ${p+1} 0 R/Resources<</XObject<</I ${p+2} 0 R>>>>>>\nendobj\n`);
+    ob(p+1,`<</Length ${cs.length}>>\nstream\n${cs}\nendstream\nendobj\n`);
+    ob(p+2,`<</Type/XObject/Subtype/Image/Width ${m.w}/Height ${m.h}/ColorSpace/DeviceRGB/BitsPerComponent 8/Filter/DCTDecode/Length ${m.d.length}>>\nstream\n`);
+    put(m.d);put('\nendstream\nendobj\n');
+  });
+  const x=len,T=3*N+3;
+  put(`xref\n0 ${T}\n0000000000 65535 f \n${off.slice(1).map(o=>String(o).padStart(10,'0')+' 00000 n \n').join('')}trailer\n<</Size ${T}/Root 1 0 R>>\nstartxref\n${x}\n%%EOF`);
+  return new Blob(parts,{type:'application/pdf'});
+}
+async function makePdf(files){
+  const imgs=[];
+  for(const f of files){
+    const bm=await createImageBitmap(f);let b=f;
+    if(!/\.jpe?g$/i.test(f.name))b=await blob(draw(bm),'image/jpeg',.95);
+    imgs.push({w:bm.width,h:bm.height,d:new Uint8Array(await b.arrayBuffer())});
+  }
+  return pdfFrom(imgs);
+}
+$('pdfb').onclick=async()=>{
+  const ns=[...sel].filter(n=>cache.has(n)&&isImg(n)).sort((a,b)=>cache.get(a).lastModified-cache.get(b).lastModified);
+  if(!ns.length)return msg('PDFにまとめる画像にチェックを入れてください(撮影順に並びます)');
+  msg('PDFを作成中…');
+  try{
+    const out=await makePdf(ns.map(n=>cache.get(n)));
+    const w=await(await(await dir()).getFileHandle(await uniq(fname(new Date()),'pdf'),{create:true})).createWritable();
+    await w.write(out);await w.close();await list();msg(`PDFを作成しました(${ns.length}枚, ${fmt(out.size)})`);
+  }catch(e){msg('PDFを作成できません('+e.name+')')}
+};
+
+/* 一括削除 */
+const pairs=ns=>ns.filter(n=>cache.has(n)&&n!==activeName).map(n=>[n,cache.get(n).size]);
+async function bulkDel(del){
+  if(!del.length)return msg('削除できるファイルがありません');
+  const un=del.filter(x=>!exp[x[0]]).length,sz=fmt(del.reduce((a,x)=>a+x[1],0));
+  if(!confirm(`${del.length}件(${sz})を削除します。`+(un?`\n\n「保存」を押していないファイルが${un}件含まれます。`:'')))return;
+  if(un&&!confirm(`未保存の${un}件は削除すると復元できません。本当に削除しますか?`))return;
+  const [k,z]=await gcRemove(del);msg(`${k}件(${fmt(z)})を削除しました`);
+}
+$('seld').onclick=()=>bulkDel(pairs([...sel]));
+$('alld').onclick=()=>bulkDel(pairs([...cache.keys()]));
+$('sela').onclick=()=>{const all=cache.size&&[...cache.keys()].every(n=>sel.has(n));cache.forEach((_,n)=>all?sel.delete(n):sel.add(n));list()};
+
 /* ファイル一覧 */
 async function list(){
   const d=await dir(),it=[];
   for await(const [n,h] of d.entries())if(h.kind==='file')it.push([n,await h.getFile()]);
-  it.sort((a,b)=>b[0].localeCompare(a[0]));
-  let dirty=false;for(const k in exp)if(!it.some(x=>x[0]===k)){delete exp[k];dirty=true}if(dirty)saveExp();
+  it.sort((a,b)=>b[1].lastModified-a[1].lastModified);
+  cache.clear();it.forEach(([n,f])=>cache.set(n,f));
+  let dirty=false;for(const k in exp)if(!cache.has(k)){delete exp[k];dirty=true}if(dirty)saveExp();
+  for(const k of [...sel])if(!cache.has(k))sel.delete(k);
   const ul=$('files');ul.replaceChildren();
   if(!it.length){const li=document.createElement('li');li.textContent='録画または静止画を保存するとここに並びます';ul.append(li)}
   for(const [n,f] of it){
     const li=document.createElement('li'),s=document.createElement('span');
+    const cb=Object.assign(document.createElement('input'),{type:'checkbox',checked:sel.has(n),onchange:()=>cb.checked?sel.add(n):sel.delete(n)});
     s.textContent=`${n}  ${fmt(f.size)}${exp[n]?'  [書き出し済み]':''}`;
-    li.append(s,btn('開く',()=>{const u=URL.createObjectURL(typed(f,n));window.open(u,'_blank');setTimeout(()=>URL.revokeObjectURL(u),6e5)}),
-      btn('保存',()=>{const u=URL.createObjectURL(typed(f,n));Object.assign(document.createElement('a'),{href:u,download:n}).click();setTimeout(()=>URL.revokeObjectURL(u),6e4);mark(n)}),
-      btn('削除',async()=>{if(!confirm(n+' を削除しますか?'))return;try{await(await dir()).removeEntry(n)}catch(e){msg('削除できません('+e.name+')')}list()}));
+    li.append(cb,s);
+    if(!/\.pdf$/i.test(n))li.append(btn('開く',()=>{const u=URL.createObjectURL(typed(f,n));window.open(u,'_blank');setTimeout(()=>URL.revokeObjectURL(u),6e5)}));
+    li.append(btn('保存',()=>{dl(typed(f,n),n);mark(n)}));
+    if(/\.jpe?g$/i.test(n))li.append(btn('PNG',async()=>{try{dl(await blob(draw(await createImageBitmap(f)),'image/png'),n.replace(/\.[^.]+$/,'.png'));mark(n)}catch(e){msg('PNGに変換できません('+e.name+')')}}));
+    li.append(btn('削除',async()=>{if(!confirm(n+' を削除しますか?'))return;try{await(await dir()).removeEntry(n)}catch(e){msg('削除できません('+e.name+')')}list()}));
     ul.append(li);
   }
 }
@@ -190,7 +319,7 @@ const mark=n=>{exp[n]=Date.now();saveExp();list()}; // 保存した時刻を記�
 async function gcScan(manual){
   const d=await dir(),days=+$('gc').value,now=Date.now(),del=[];
   for await(const [n,h] of d.entries()){
-    if(h.kind!=='file'||(recording&&n.startsWith('rec_'+base)))continue;
+    if(h.kind!=='file'||n===activeName)continue;
     const f=await h.getFile();
     const old=exp[n]&&(manual||(days&&now-exp[n]>days*864e5));
     if(old||(f.size===0&&now-f.lastModified>36e5))del.push([n,f.size]);
@@ -199,7 +328,7 @@ async function gcScan(manual){
 }
 async function gcRemove(del){
   const d=await dir();let k=0,s=0;
-  for(const [n,z] of del){try{await d.removeEntry(n);delete exp[n];k++;s+=z}catch{}}
+  for(const [n,z] of del){try{await d.removeEntry(n);delete exp[n];sel.delete(n);k++;s+=z}catch{}}
   saveExp();await list();return [k,s];
 }
 async function autoGc(){
@@ -225,7 +354,7 @@ async function pst(){
 $('rec').onclick=()=>recording?stopRec():startRec();
 if(!window.MediaRecorder||!navigator.storage?.getDirectory)msg('このブラウザは非対応です。Chromeを使用してください');
 navigator.serviceWorker?.register('sw.js');
-startCam();list().then(autoGc);renderQr();tick();setInterval(tick,1000);
+drawSubj();startCam();list().then(autoGc);renderQr();tick();setInterval(tick,1000);
 pst();navigator.storage.persist?.().then(pst,pst);
 </script>
 </body>
