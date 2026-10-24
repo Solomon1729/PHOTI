@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1c2025">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<title>オフライン録画</title>
+<style>
+:root{--ink:#1c2025;--mut:#5c6670;--line:#d5d9de;--bg:#eef0f2;--rec:#d92d20;color-scheme:light}
+*{box-sizing:border-box}
+body{margin:0 auto;max-width:720px;padding:max(10px,env(safe-area-inset-top)) 12px max(16px,env(safe-area-inset-bottom));background:var(--bg);color:var(--ink);font:15px/1.5 "Hiragino Sans","Noto Sans JP",system-ui,sans-serif}
+video{display:block;width:100%;max-height:55vh;background:#000;border-radius:6px;object-fit:contain}
+#info{margin-top:6px;color:var(--mut);font-variant-numeric:tabular-nums;min-height:1.5em}
+#st{color:var(--rec);min-height:1.5em}
+.row{display:flex;gap:8px;margin:6px 0 10px}
+button,select{font:inherit;color:var(--ink);background:#fff;border:1px solid var(--line);border-radius:6px;padding:10px 14px}
+#rec{flex:2;background:var(--rec);border-color:var(--rec);color:#fff;font-weight:700}
+#rec.on{background:#fff;color:var(--rec)}
+#snap{flex:1}
+button.s{padding:3px 10px;margin-left:6px}
+summary{cursor:pointer;color:var(--mut);margin:8px 0}
+.grid{display:grid;grid-template-columns:auto 1fr;gap:6px 12px;align-items:center}
+select{padding:6px 8px}
+h2{font-size:15px;margin:20px 0 4px;display:flex;justify-content:space-between;align-items:center}
+#pst{font-weight:400;color:var(--mut);font-size:13px}
+ul{list-style:none;margin:0;padding:0}
+li{padding:7px 0;border-bottom:1px solid var(--line);word-break:break-all}
+a{color:#0b5cad}
+</style>
+</head>
+<body>
+<video id="v" autoplay playsinline muted></video>
+<div id="info"></div><div id="st"></div>
+<div class="row"><button id="rec">録画開始</button><button id="snap">静止画</button></div>
+<label><input type="checkbox" id="qr"> <span id="qrt">QRコードを読み取る</span></label>
+<details open><summary>設定</summary>
+<div class="grid">
+<label for="face">カメラ</label><select id="face"><option value="environment">背面</option><option value="user">前面</option></select>
+<label for="res">解像度</label><select id="res"><option value="1280x720">1280×720</option><option value="1920x1080">1920×1080</option><option value="3840x2160">3840×2160</option></select>
+<label for="fps">fps</label><select id="fps"><option>30</option><option>15</option><option>60</option></select>
+<label for="br">ビットレート</label><select id="br"><option value="1">1 Mbps(約7MB/分)</option><option value="2.5" selected>2.5 Mbps(約19MB/分)</option><option value="5">5 Mbps(約38MB/分)</option><option value="10">10 Mbps(約75MB/分)</option></select>
+<label for="seg">ファイル分割</label><select id="seg"><option value="0">しない</option><option value="5">5分ごと</option><option value="10" selected>10分ごと</option><option value="30">30分ごと</option></select>
+<label for="gc">自動整理</label><select id="gc"><option value="0">しない</option><option value="1">書き出し済みを1日後に削除</option><option value="3">書き出し済みを3日後に削除</option><option value="7" selected>書き出し済みを7日後に削除</option><option value="30">書き出し済みを30日後に削除</option></select>
+<label for="aud">音声</label><input type="checkbox" id="aud" checked>
+</div></details>
+<h2>QR履歴 <button class="s" id="qclr">消去</button></h2><ul id="qlog"></ul>
+<h2>保存ファイル <span><span id="pst"></span><button class="s" id="gcb">整理</button></span></h2><ul id="files"></ul>
+<script>
+'use strict';
+const $=id=>document.getElementById(id),v=$('v');
+const MIMES=['video/mp4;codecs=avc1,mp4a.40.2','video/mp4','video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/webm'];
+const mime=window.MediaRecorder?MIMES.find(m=>MediaRecorder.isTypeSupported(m))||'':'';
+const ext=mime.includes('mp4')?'mp4':'webm';
+const MIN_FREE=300*2**20; // これを下回ると自動停止
+let stream,rec,segTimer,wake,root,base,seg=0,bytes=0,t0=0,recording=false,stopping=false,note='';
+const pad=n=>String(n).padStart(2,'0');
+const stamp=()=>{const d=new Date();return ''+d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'_'+pad(d.getHours())+pad(d.getMinutes())+pad(d.getSeconds())};
+const fmt=b=>b>=2**30?(b/2**30).toFixed(2)+' GB':(b/2**20).toFixed(1)+' MB';
+const msg=t=>$('st').textContent=t, warn=t=>{note=t;msg(t)};
+const dir=async()=>root||(root=await navigator.storage.getDirectory());
+const free=async()=>{const e=await navigator.storage.estimate();return e.quota-e.usage};
+const mt=n=>n.endsWith('.mp4')?'video/mp4':n.endsWith('.webm')?'video/webm':'image/jpeg';
+const typed=(f,n)=>new File([f],n,{type:mt(n)});
+const btn=(t,f)=>Object.assign(document.createElement('button'),{textContent:t,onclick:f,className:'s'});
+
+async function startCam(){
+  stream?.getTracks().forEach(t=>t.stop());
+  const [w,h]=$('res').value.split('x').map(Number);
+  const video={facingMode:{ideal:$('face').value},width:{ideal:w},height:{ideal:h},frameRate:{ideal:+$('fps').value}};
+  try{stream=await navigator.mediaDevices.getUserMedia({video,audio:$('aud').checked})}
+  catch(e){
+    try{stream=await navigator.mediaDevices.getUserMedia({video});$('aud').checked=false;msg('マイクなしで起動しました')}
+    catch(e2){msg('カメラを起動できません('+e2.name+')。権限とHTTPS接続を確認してください');return}
+  }
+  v.srcObject=stream;
+}
+
+function lock(on){
+  ['face','res','fps','aud','br','seg'].forEach(i=>$(i).disabled=on);
+  $('rec').textContent=on?'停止':'録画開始';$('rec').classList.toggle('on',on);
+}
+
+async function newSeg(){
+  const name=`rec_${base}_${pad(++seg)}.${ext}`;
+  const w=await(await(await dir()).getFileHandle(name,{create:true})).createWritable();
+  const r=rec=new MediaRecorder(stream,{mimeType:mime||undefined,videoBitsPerSecond:+$('br').value*1e6});
+  let chain=Promise.resolve();
+  r.ondataavailable=e=>{
+    if(!e.data.size)return;
+    bytes+=e.data.size;
+    chain=chain.then(()=>w.write(e.data)).catch(err=>{warn('書き込みエラーのため停止しました('+err.name+')');stopRec()});
+  };
+  r.onstop=async()=>{
+    clearTimeout(segTimer);
+    await chain;
+    try{await w.close()}catch(e){warn('保存エラー('+e.name+')')}
+    list();
+    if(!stopping&&stream.active)newSeg().catch(e=>{warn('分割に失敗しました('+e.name+')');finish()});else finish();
+  };
+  r.start(1000); // 1秒ごとにデータを受け取りディスクへ書く
+  const m=+$('seg').value;
+  if(m)segTimer=setTimeout(()=>{if(r.state==='recording')r.stop()},m*60000);
+}
+
+async function startRec(){
+  if(!stream?.active)return msg('カメラが起動していません');
+  if(await free()<MIN_FREE)return msg('空き容量が不足しています。「整理」で書き出し済みファイルを削除できます');
+  navigator.storage.persist?.();
+  base=stamp();seg=0;bytes=0;t0=Date.now();stopping=false;recording=true;note='';msg('');
+  try{wake=await navigator.wakeLock?.request('screen')}catch{}
+  lock(true);
+  try{await newSeg()}catch(e){warn('録画を開始できません('+e.message+')');finish()}
+}
+function stopRec(){stopping=true;if(rec&&rec.state!=='inactive')rec.stop()}
+function finish(){recording=false;wake?.release().catch(()=>{});lock(false);msg(note||'保存しました');note='';list();autoGc()}
+
+async function tick(){
+  const f=await free();
+  if(!recording){$('info').textContent='空き容量 約'+fmt(f);return}
+  const s=Math.floor((Date.now()-t0)/1000);
+  $('info').textContent=`● ${pad(s/3600|0)}:${pad(s/60%60|0)}:${pad(s%60)}   ${fmt(bytes)}   空き約${fmt(f)}`;
+  if(f<MIN_FREE){warn('空き容量が少ないため停止しました');stopRec()}
+}
+
+$('snap').onclick=async()=>{
+  if(!v.videoWidth)return;
+  const c=document.createElement('canvas');c.width=v.videoWidth;c.height=v.videoHeight;
+  c.getContext('2d').drawImage(v,0,0);
+  const b=await new Promise(r=>c.toBlob(r,'image/jpeg',.92));
+  try{
+    const w=await(await(await dir()).getFileHandle(`img_${stamp()}_${Date.now()%1000}.jpg`,{create:true})).createWritable();
+    await w.write(b);await w.close();list();
+  }catch(e){msg('静止画を保存できません('+e.name+')')}
+};
+
+/* QR */
+const det=window.BarcodeDetector?new BarcodeDetector({formats:['qr_code']}):null;
+if(!det){$('qr').disabled=true;$('qrt').textContent+='(この端末は非対応)'}
+let seen='',qlog=[];
+try{qlog=JSON.parse(localStorage.qlog||'[]')}catch{}
+async function qrLoop(){
+  if(!$('qr').checked)return;
+  try{const r=await det.detect(v);const c=r[0]?.rawValue;if(c&&c!==seen){seen=c;addQr(c)}}catch{}
+  setTimeout(qrLoop,300);
+}
+$('qr').onchange=()=>{seen='';qrLoop()};
+function addQr(c){
+  qlog.unshift({t:new Date().toLocaleString('ja-JP'),c});qlog=qlog.slice(0,100);
+  try{localStorage.qlog=JSON.stringify(qlog)}catch{}
+  navigator.vibrate?.(80);renderQr();
+}
+function renderQr(){
+  const ul=$('qlog');ul.replaceChildren();
+  for(const q of qlog){
+    const li=document.createElement('li'),s=document.createElement('span');
+    s.textContent=q.t+'  ';
+    const body=/^https?:\/\//.test(q.c)?Object.assign(document.createElement('a'),{href:q.c,target:'_blank',rel:'noopener',textContent:q.c}):Object.assign(document.createElement('span'),{textContent:q.c});
+    li.append(s,body,btn('コピー',()=>navigator.clipboard.writeText(q.c)));ul.append(li);
+  }
+}
+$('qclr').onclick=()=>{qlog=[];try{localStorage.qlog='[]'}catch{}renderQr()};
+
+/* ファイル一覧 */
+async function list(){
+  const d=await dir(),it=[];
+  for await(const [n,h] of d.entries())if(h.kind==='file')it.push([n,await h.getFile()]);
+  it.sort((a,b)=>b[0].localeCompare(a[0]));
+  let dirty=false;for(const k in exp)if(!it.some(x=>x[0]===k)){delete exp[k];dirty=true}if(dirty)saveExp();
+  const ul=$('files');ul.replaceChildren();
+  if(!it.length){const li=document.createElement('li');li.textContent='録画または静止画を保存するとここに並びます';ul.append(li)}
+  for(const [n,f] of it){
+    const li=document.createElement('li'),s=document.createElement('span');
+    s.textContent=`${n}  ${fmt(f.size)}${exp[n]?'  [書き出し済み]':''}`;
+    li.append(s,btn('開く',()=>{const u=URL.createObjectURL(typed(f,n));window.open(u,'_blank');setTimeout(()=>URL.revokeObjectURL(u),6e5)}),
+      btn('保存',()=>{const u=URL.createObjectURL(typed(f,n));Object.assign(document.createElement('a'),{href:u,download:n}).click();setTimeout(()=>URL.revokeObjectURL(u),6e4);mark(n)}),
+      btn('削除',async()=>{if(!confirm(n+' を削除しますか?'))return;try{await(await dir()).removeEntry(n)}catch(e){msg('削除できません('+e.name+')')}list()}));
+    ul.append(li);
+  }
+}
+
+/* 書き出し記録と自動整理(GC) */
+let exp={};
+try{exp=JSON.parse(localStorage.exp||'{}')}catch{}
+try{$('gc').value=localStorage.gc??'7'}catch{}
+const saveExp=()=>{try{localStorage.exp=JSON.stringify(exp)}catch{}};
+const mark=n=>{exp[n]=Date.now();saveExp();list()}; // 保存した時刻を記録
+// 削除対象: 書き出し済み(manual=trueなら全部、falseなら設定日数を超えたもの)と、1時間以上前の空ファイル。未書き出しは対象外
+async function gcScan(manual){
+  const d=await dir(),days=+$('gc').value,now=Date.now(),del=[];
+  for await(const [n,h] of d.entries()){
+    if(h.kind!=='file'||(recording&&n.startsWith('rec_'+base)))continue;
+    const f=await h.getFile();
+    const old=exp[n]&&(manual||(days&&now-exp[n]>days*864e5));
+    if(old||(f.size===0&&now-f.lastModified>36e5))del.push([n,f.size]);
+  }
+  return del;
+}
+async function gcRemove(del){
+  const d=await dir();let k=0,s=0;
+  for(const [n,z] of del){try{await d.removeEntry(n);delete exp[n];k++;s+=z}catch{}}
+  saveExp();await list();return [k,s];
+}
+async function autoGc(){
+  if(!+$('gc').value)return;
+  const del=await gcScan(false);if(!del.length)return;
+  const [k,s]=await gcRemove(del);msg(`自動整理: ${k}件(${fmt(s)})を削除しました`);
+}
+$('gc').onchange=()=>{try{localStorage.gc=$('gc').value}catch{}autoGc()};
+$('gcb').onclick=async()=>{
+  const del=await gcScan(true);
+  if(!del.length)return msg('整理できるファイルはありません(書き出していないファイルは対象外です)');
+  if(!confirm(`書き出し済み・空のファイル ${del.length}件(${fmt(del.reduce((a,x)=>a+x[1],0))})を削除しますか?`))return;
+  const [k,s]=await gcRemove(del);msg(`${k}件(${fmt(s)})を削除しました`);
+};
+async function pst(){
+  const p=await navigator.storage.persisted?.();
+  $('pst').textContent=p?'消去保護: 有効':'消去保護: 無効';
+  $('pst').title='有効だと、ブラウザが容量不足を理由に自動でデータを消すことがありません';
+}
+
+/* 起動 */
+['face','res','fps','aud'].forEach(i=>$(i).onchange=startCam);
+$('rec').onclick=()=>recording?stopRec():startRec();
+if(!window.MediaRecorder||!navigator.storage?.getDirectory)msg('このブラウザは非対応です。Chromeを使用してください');
+navigator.serviceWorker?.register('sw.js');
+startCam();list().then(autoGc);renderQr();tick();setInterval(tick,1000);
+pst();navigator.storage.persist?.().then(pst,pst);
+</script>
+</body>
+</html>
